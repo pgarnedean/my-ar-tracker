@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR 3D Trajectory Tracker</title>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; }
+        #ui { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 10; display: flex; gap: 10px; }
+        button { padding: 12px 20px; font-size: 16px; border-radius: 8px; border: none; background: #007AFF; color: white; font-weight: bold; }
+        button:disabled { background: #ccc; }
+        #status { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.5); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div id="status">AR Ready</div>
+    <div id="ui">
+        <button id="start-button">AR開始</button>
+        <button id="save-button" disabled>3D保存 (.gltf)</button>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+
+        let scene, camera, renderer, controller;
+        let lineGeometry, line;
+        let points = [];
+        const startButton = document.getElementById('start-button');
+        const saveButton = document.getElementById('save-button');
+        const status = document.getElementById('status');
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            // 線の設定
+            lineGeometry = new THREE.BufferGeometry();
+            const material = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 5 });
+            line = new THREE.Line(lineGeometry, material);
+            scene.add(line);
+
+            // ARのコントローラー（スマホの位置取得用）
+            controller = renderer.xr.getController(0);
+            scene.add(controller);
+
+            // ボタン設定
+            startButton.addEventListener('click', startAR);
+            saveButton.addEventListener('click', exportGLTF);
+        }
+
+        async function startAR() {
+            const sessionInit = { requiredFeatures: ['local-floor'] };
+            const session = await navigator.xr.requestSession('immersive-ar', sessionInit);
+            renderer.xr.setSession(session);
+            startButton.style.display = 'none';
+            saveButton.disabled = false;
+            status.textContent = "Tracking...";
+            
+            renderer.setAnimationLoop(render);
+        }
+
+        function render(timestamp, frame) {
+            if (frame) {
+                const session = frame.session;
+                const pose = frame.getViewerPose(renderer.xr.getReferenceSpace());
+
+                if (pose) {
+                    const pos = pose.transform.position;
+                    // 現在の座標を取得 (メートル単位)
+                    const newPoint = new THREE.Vector3(pos.x, pos.y, pos.z);
+                    
+                    // 前の点と一定以上の距離があれば追加（データの肥大化防止）
+                    if (points.length === 0 || newPoint.distanceTo(points[points.length - 1]) > 0.02) {
+                        points.push(newPoint);
+                        lineGeometry.setFromPoints(points);
+                        status.textContent = `Points: ${points.length}`;
+                    }
+                }
+            }
+            renderer.render(scene, camera);
+        }
+
+        function exportGLTF() {
+            const exporter = new GLTFExporter();
+            exporter.parse(scene, (gltf) => {
+                const blob = new Blob([JSON.stringify(gltf)], { type: 'application/octet-stream' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'my_path.gltf';
+                a.click();
+            });
+        }
+
+        init();
+    </script>
+</body>
+</html>
