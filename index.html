@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AR 3D Tracker Pro</title>
+    <title>AR 3D Tracker Pro Fix</title>
     <script type="importmap">
         {
             "imports": {
@@ -34,7 +34,7 @@
         let scene, camera, renderer, currentSession;
         let lineGeometry, line, positions;
         
-        const MAX_POINTS = 10000; // 最大1万点（約100メートル分）
+        const MAX_POINTS = 10000; // 最大1万点
         let pointCount = 0;
         let lastPoint = new THREE.Vector3(9999, 9999, 9999);
         let isSavingRequested = false;
@@ -53,11 +53,11 @@
             renderer.xr.enabled = true;
             document.body.appendChild(renderer.domElement);
 
-            // --- 線の準備（安定して描画される方式） ---
-            positions = new Float32Array(MAX_POINTS * 3); // 座標を入れる箱を準備
+            // 線のデータを入れる箱を準備
+            positions = new Float32Array(MAX_POINTS * 3); 
             lineGeometry = new THREE.BufferGeometry();
             lineGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            lineGeometry.setDrawRange(0, 0); // 最初は描画しない
+            lineGeometry.setDrawRange(0, 0); 
             
             const material = new THREE.LineBasicMaterial({ 
                 color: 0x00FF00, // 緑色
@@ -66,20 +66,18 @@
             line = new THREE.Line(lineGeometry, material);
             scene.add(line);
 
-            // ボタンのイベント
             startButton.addEventListener('click', startAR);
             stopSaveButton.addEventListener('click', requestStopAndSave);
         }
 
         async function startAR() {
             try {
-                // local-floorだと高さがおかしくなることがあるため、localに変更
-                const sessionInit = { requiredFeatures: ['local'] };
+                // WebXR Viewerでエラーが出にくいように optionalFeatures に変更
+                const sessionInit = { optionalFeatures: ['local-floor', 'bounded-floor'] };
                 const session = await navigator.xr.requestSession('immersive-ar', sessionInit);
                 renderer.xr.setSession(session);
                 currentSession = session;
 
-                // UIの切り替え
                 startButton.style.display = 'none';
                 stopSaveButton.style.display = 'block';
                 status.textContent = "スマホを動かすと軌跡が残ります";
@@ -95,7 +93,7 @@
             if (currentSession) {
                 isSavingRequested = true;
                 status.textContent = "ARを終了しています...";
-                currentSession.end(); // ARを終了（終わると onSessionEnd が呼ばれる）
+                currentSession.end();
             }
         }
 
@@ -113,27 +111,35 @@
             }
         }
 
-        function render() {
-            // AR実行中のみ記録する
-            if (renderer.xr.isPresenting) {
-                const pos = new THREE.Vector3();
-                // スマホ（カメラ）の現在位置をワールド座標で取得
-                camera.getWorldPosition(pos); 
+        // ここが一番重要な「スマホの座標を取る」部分です
+        function render(timestamp, frame) {
+            if (frame) {
+                const refSpace = renderer.xr.getReferenceSpace();
+                if (refSpace) {
+                    // スマホ（Viewer）の正確な位置をARシステムから直接取得
+                    const pose = frame.getViewerPose(refSpace);
 
-                // 前の点から1cm (0.01m) 以上動いた時だけ点を追加
-                if (lastPoint.distanceTo(pos) > 0.01) {
-                    if (pointCount < MAX_POINTS) {
-                        // 新しい座標を配列に追加
-                        positions[pointCount * 3] = pos.x;
-                        positions[pointCount * 3 + 1] = pos.y;
-                        positions[pointCount * 3 + 2] = pos.z;
-                        
-                        pointCount++;
-                        lineGeometry.setDrawRange(0, pointCount); // 描画範囲を更新
-                        lineGeometry.attributes.position.needsUpdate = true; // 画面に反映
-                        
-                        lastPoint.copy(pos); // 最後の位置を更新
-                        status.textContent = `記録中: ${pointCount} センチ`;
+                    if (pose) {
+                        const pos = pose.transform.position;
+                        const currentPos = new THREE.Vector3(pos.x, pos.y, pos.z);
+
+                        // 前回から1cm以上動いた時だけ点を追加
+                        if (pointCount === 0 || lastPoint.distanceTo(currentPos) > 0.01) {
+                            if (pointCount < MAX_POINTS) {
+                                positions[pointCount * 3] = pos.x;
+                                positions[pointCount * 3 + 1] = pos.y;
+                                positions[pointCount * 3 + 2] = pos.z;
+                                
+                                pointCount++;
+                                lineGeometry.setDrawRange(0, pointCount);
+                                lineGeometry.attributes.position.needsUpdate = true;
+                                
+                                lastPoint.copy(currentPos); 
+                                status.textContent = `記録中: ${pointCount} 点`;
+                            }
+                        }
+                    } else {
+                        status.textContent = "位置を計算中...少し動かしてください";
                     }
                 }
             }
