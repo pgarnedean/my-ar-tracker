@@ -14,20 +14,17 @@
     </script>
     <style>
         body { margin: 0; overflow: hidden; font-family: sans-serif; background: #000; }
-        #ui { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); z-index: 10; display: flex; flex-direction: column; gap: 10px; width: 80%; max-width: 300px; }
-        button { padding: 15px; font-size: 16px; border-radius: 12px; border: none; background: #007AFF; color: white; font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }
-        #stop-button { background: #FF3B30; display: none; }
-        #save-button { background: #34C759; }
-        button:disabled { background: #8e8e93; opacity: 0.6; }
-        #status { position: absolute; top: 40px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: white; padding: 8px 15px; border-radius: 20px; font-size: 14px; white-space: nowrap; z-index: 10; }
+        #ui { position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); z-index: 10; display: flex; flex-direction: column; gap: 10px; width: 80%; max-width: 300px; }
+        button { padding: 18px; font-size: 18px; border-radius: 12px; border: none; background: #007AFF; color: white; font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        #stop-save-button { background: #FF3B30; display: none; }
+        #status { position: absolute; top: 50px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: white; padding: 10px 20px; border-radius: 20px; font-size: 14px; white-space: nowrap; z-index: 10; pointer-events: none; }
     </style>
 </head>
 <body>
-    <div id="status">カメラを動かして周りを映してください</div>
+    <div id="status">準備完了：AR開始を押してください</div>
     <div id="ui">
         <button id="start-button">AR開始</button>
-        <button id="stop-button">AR終了</button>
-        <button id="save-button" disabled>3Dデータを保存する</button>
+        <button id="stop-save-button">終了して3D保存する</button>
     </div>
 
     <script type="module">
@@ -35,12 +32,15 @@
         import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 
         let scene, camera, renderer, currentSession;
-        let lineGeometry, line;
-        let points = [];
+        let lineGeometry, line, positions;
+        
+        const MAX_POINTS = 10000; // 最大1万点（約100メートル分）
+        let pointCount = 0;
+        let lastPoint = new THREE.Vector3(9999, 9999, 9999);
+        let isSavingRequested = false;
         
         const startButton = document.getElementById('start-button');
-        const stopButton = document.getElementById('stop-button');
-        const saveButton = document.getElementById('save-button');
+        const stopSaveButton = document.getElementById('stop-save-button');
         const status = document.getElementById('status');
 
         function init() {
@@ -53,90 +53,109 @@
             renderer.xr.enabled = true;
             document.body.appendChild(renderer.domElement);
 
-            // 線の太さと色の設定
+            // --- 線の準備（安定して描画される方式） ---
+            positions = new Float32Array(MAX_POINTS * 3); // 座標を入れる箱を準備
             lineGeometry = new THREE.BufferGeometry();
+            lineGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            lineGeometry.setDrawRange(0, 0); // 最初は描画しない
+            
             const material = new THREE.LineBasicMaterial({ 
                 color: 0x00FF00, // 緑色
-                linewidth: 10    // ※ブラウザにより太さは固定される場合があります
+                linewidth: 5 
             });
             line = new THREE.Line(lineGeometry, material);
             scene.add(line);
 
+            // ボタンのイベント
             startButton.addEventListener('click', startAR);
-            stopButton.addEventListener('click', stopAR);
-            saveButton.addEventListener('click', exportGLTF);
+            stopSaveButton.addEventListener('click', requestStopAndSave);
         }
 
         async function startAR() {
             try {
-                const sessionInit = { requiredFeatures: ['local-floor'] };
+                // local-floorだと高さがおかしくなることがあるため、localに変更
+                const sessionInit = { requiredFeatures: ['local'] };
                 const session = await navigator.xr.requestSession('immersive-ar', sessionInit);
                 renderer.xr.setSession(session);
                 currentSession = session;
 
-                // UIの表示切り替え
+                // UIの切り替え
                 startButton.style.display = 'none';
-                stopButton.style.display = 'block';
-                saveButton.disabled = false;
-                status.textContent = "スマホを動かすと線が引かれます";
+                stopSaveButton.style.display = 'block';
+                status.textContent = "スマホを動かすと軌跡が残ります";
 
                 session.addEventListener('end', onSessionEnd);
                 renderer.setAnimationLoop(render);
             } catch (e) {
-                alert("ARを開始できませんでした: " + e.message);
+                status.textContent = "エラー: " + e.message;
             }
         }
 
-        function stopAR() {
+        function requestStopAndSave() {
             if (currentSession) {
-                currentSession.end();
+                isSavingRequested = true;
+                status.textContent = "ARを終了しています...";
+                currentSession.end(); // ARを終了（終わると onSessionEnd が呼ばれる）
             }
         }
 
         function onSessionEnd() {
             currentSession = null;
             startButton.style.display = 'block';
-            stopButton.style.display = 'none';
-            status.textContent = "AR終了。保存ボタンでデータを残せます。";
+            stopSaveButton.style.display = 'none';
+            renderer.setAnimationLoop(null);
+            
+            if (isSavingRequested) {
+                exportGLTF();
+                isSavingRequested = false;
+            } else {
+                status.textContent = "AR終了。";
+            }
         }
 
-        function render(timestamp, frame) {
-            if (frame) {
-                const refSpace = renderer.xr.getReferenceSpace();
-                const pose = frame.getViewerPose(refSpace);
+        function render() {
+            // AR実行中のみ記録する
+            if (renderer.xr.isPresenting) {
+                const pos = new THREE.Vector3();
+                // スマホ（カメラ）の現在位置をワールド座標で取得
+                camera.getWorldPosition(pos); 
 
-                if (pose) {
-                    const pos = pose.transform.position;
-                    // 現在のスマホ位置
-                    const newPoint = new THREE.Vector3(pos.x, pos.y, pos.z);
-                    
-                    // 1cm以上動いたら新しい点を追加
-                    if (points.length === 0 || newPoint.distanceTo(points[points.length - 1]) > 0.01) {
-                        points.push(newPoint);
-                        lineGeometry.setFromPoints(points);
-                        status.textContent = `描画中: ${points.length} 地点記録`;
+                // 前の点から1cm (0.01m) 以上動いた時だけ点を追加
+                if (lastPoint.distanceTo(pos) > 0.01) {
+                    if (pointCount < MAX_POINTS) {
+                        // 新しい座標を配列に追加
+                        positions[pointCount * 3] = pos.x;
+                        positions[pointCount * 3 + 1] = pos.y;
+                        positions[pointCount * 3 + 2] = pos.z;
+                        
+                        pointCount++;
+                        lineGeometry.setDrawRange(0, pointCount); // 描画範囲を更新
+                        lineGeometry.attributes.position.needsUpdate = true; // 画面に反映
+                        
+                        lastPoint.copy(pos); // 最後の位置を更新
+                        status.textContent = `記録中: ${pointCount} センチ`;
                     }
-                } else {
-                    status.textContent = "位置を計算中...スマホをゆっくり動かしてください";
                 }
             }
             renderer.render(scene, camera);
         }
 
         function exportGLTF() {
-            if (points.length < 2) {
-                alert("データが少なすぎて保存できません。少し歩いてみてください。");
+            if (pointCount < 2) {
+                status.textContent = "データが少なすぎて保存できませんでした。";
                 return;
             }
-            status.textContent = "保存用データを作成中...";
+            status.textContent = "3Dデータを保存中...";
             const exporter = new GLTFExporter();
             exporter.parse(scene, (gltf) => {
                 const blob = new Blob([JSON.stringify(gltf)], { type: 'application/octet-stream' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = 'ar_trajectory.gltf';
+                a.download = 'my_trajectory.gltf';
+                document.body.appendChild(a);
                 a.click();
+                document.body.removeChild(a);
                 status.textContent = "保存完了！";
             });
         }
