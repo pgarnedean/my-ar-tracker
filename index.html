@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AR Precision 2D Map</title>
+    <title>AR 2D Precision Map</title>
     <script type="importmap">
         {
             "imports": {
@@ -13,65 +13,47 @@
     </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
-        body { margin: 0; overflow: hidden; background: #000; font-family: -apple-system, sans-serif; }
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
         
-        /* カメラ映像（Three.js）を一番下に配置 */
-        #ar-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        /* 1. 一番下：ARカメラ映像 */
+        #ar-canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
         
-        /* 2Dマップをカメラの上に重ねる。backgroundでカメラの「うっすら感」を調整 */
-        #map-canvas { 
-            position: absolute; 
-            top: 0; 
-            left: 0; 
-            width: 100%; 
-            height: 100%; 
-            z-index: 2; 
-            background: rgba(0, 0, 0, 0.6); /* 0.6を小さくするとカメラがはっきり、大きくすると暗くなります */
-        }
+        /* 2. 真ん中：カメラをうっすらさせるための膜 */
+        #dimmer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; background: rgba(0, 0, 0, 0.5); pointer-events: none; }
         
-        /* UIデザイン */
+        /* 3. 一番上：2Dのグリッドと軌跡を描画するキャンバス */
+        #map-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 3; pointer-events: none; }
+
+        /* UI（ボタンとステータス） */
         #ui { position: absolute; bottom: 40px; left: 0; width: 100%; display: flex; flex-direction: column; align-items: center; gap: 15px; z-index: 100; }
         .btn-group { display: flex; gap: 12px; width: 90%; max-width: 400px; }
-        button { flex: 1; padding: 18px; font-size: 16px; font-weight: bold; border: none; border-radius: 12px; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.5); cursor: pointer; }
+        button { flex: 1; padding: 20px; font-size: 18px; font-weight: bold; border: none; border-radius: 15px; color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.5); pointer-events: auto; }
         #start-btn { background: #007AFF; }
         #stop-btn { background: #FF3B30; display: none; }
         #save-btn { background: #34C759; display: none; }
         
-        #status { 
-            position: absolute; 
-            top: 60px; 
-            left: 50%; 
-            transform: translateX(-50%); 
-            background: rgba(255, 255, 255, 0.9); 
-            color: #333; 
-            padding: 10px 20px; 
-            border-radius: 20px; 
-            font-size: 14px; 
-            z-index: 110; 
-            font-weight: bold; 
-            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-            white-space: nowrap;
-        }
+        #status { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); background: white; color: black; padding: 12px 25px; border-radius: 30px; font-size: 14px; z-index: 110; font-weight: bold; white-space: nowrap; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
     </style>
 </head>
 <body>
     <div id="status">準備完了：スタートを押してください</div>
-    <div id="ar-container"></div>
+    <div id="ar-canvas-container"></div>
+    <div id="dimmer"></div>
     <canvas id="map-canvas"></canvas>
 
     <div id="ui">
         <div class="btn-group">
             <button id="start-btn">スタート</button>
             <button id="stop-btn">終了</button>
-            <button id="save-btn">PDFで保存する</button>
+            <button id="save-btn">PDFを保存</button>
         </div>
     </div>
 
     <script type="module">
         import * as THREE from 'three';
 
-        const canvas = document.getElementById('map-canvas');
-        const ctx = canvas.getContext('2d');
+        const mapCanvas = document.getElementById('map-canvas');
+        const ctx = mapCanvas.getContext('2d');
         const status = document.getElementById('status');
         const startBtn = document.getElementById('start-btn');
         const stopBtn = document.getElementById('stop-btn');
@@ -81,18 +63,18 @@
         let points = [];
         let isTracking = false;
         
-        // 1メートル = 60ピクセル で描画（iPhoneの画面サイズでちょうどいい縮尺）
-        const SCALE = 60; 
+        // 1メートルを 80ピクセル で描画します
+        const SCALE = 80; 
 
         function init() {
-            // Three.jsの設定（カメラ映像を処理する用）
+            // Three.js セットアップ
             scene = new THREE.Scene();
             camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
             renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
             renderer.setPixelRatio(window.devicePixelRatio);
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true;
-            document.getElementById('ar-container').appendChild(renderer.domElement);
+            document.getElementById('ar-canvas-container').appendChild(renderer.domElement);
 
             startBtn.addEventListener('click', startAR);
             stopBtn.addEventListener('click', stopAR);
@@ -100,137 +82,137 @@
 
             window.addEventListener('resize', onResize);
             onResize();
-            drawGrid(0, 0); // 初期画面
         }
 
         function onResize() {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
-            drawGrid(0, 0);
+            mapCanvas.width = window.innerWidth;
+            mapCanvas.height = window.innerHeight;
+            drawEverything(0, 0); 
         }
 
         async function startAR() {
             try {
-                // ARセッションの開始。'local'は床認識を待たずに現在の位置を0点として開始するモード
+                // セッション開始。'local' 指定により、現在の向きを基準にします
                 const session = await navigator.xr.requestSession('immersive-ar', {
-                    optionalFeatures: ['local-floor', 'bounded-floor']
+                    requiredFeatures: ['local']
                 });
                 renderer.xr.setSession(session);
                 currentSession = session;
 
-                points = [{x: 0, z: 0}]; // スタート地点をリセット
+                points = []; // データをリセット
                 isTracking = true;
 
                 startBtn.style.display = 'none';
                 stopBtn.style.display = 'block';
                 saveBtn.style.display = 'none';
-                status.textContent = "初期化中：スマホをゆっくり動かしてください";
+                status.textContent = "カメラをゆっくり動かして周囲を認識させてください";
 
-                session.addEventListener('end', onSessionEnd);
-                renderer.setAnimationLoop(render);
+                renderer.setAnimationLoop(renderLoop);
             } catch (e) {
-                status.textContent = "エラー: " + e.message;
+                status.textContent = "起動エラー: " + e.message;
             }
         }
 
         function stopAR() {
-            if (currentSession) currentSession.end();
+            if (currentSession) {
+                currentSession.end();
+            }
         }
 
+        // ARセッション終了時の処理
         function onSessionEnd() {
             isTracking = false;
             renderer.setAnimationLoop(null);
             stopBtn.style.display = 'none';
             startBtn.style.display = 'block';
-            if (points.length > 2) saveBtn.style.display = 'block';
-            status.textContent = "記録終了：PDF保存が可能です";
+            if (points.length > 2) {
+                saveBtn.style.display = 'block';
+                status.textContent = "記録完了：PDFを保存できます";
+            } else {
+                status.textContent = "移動データがありませんでした";
+            }
         }
 
-        function render(timestamp, frame) {
+        function renderLoop(timestamp, frame) {
             if (frame && isTracking) {
                 const refSpace = renderer.xr.getReferenceSpace();
                 const pose = frame.getViewerPose(refSpace);
 
                 if (pose) {
                     const pos = pose.transform.position;
-                    // AR空間のXとZを平面の座標として使用
+                    // X=左右, Z=前後（AR空間）
                     const curX = pos.x;
                     const curZ = pos.z;
+
+                    // 最初の1点を打つ
+                    if (points.length === 0) {
+                        points.push({ x: curX, z: curZ });
+                    }
 
                     const last = points[points.length - 1];
                     const dist = Math.hypot(curX - last.x, curZ - last.z);
 
-                    // 2cm以上動いたら新しい点として追加
+                    // 2cm動いたら記録。これでカクつきを抑える
                     if (dist > 0.02) {
                         points.push({ x: curX, z: curZ });
-                        status.textContent = `追跡中: 約 ${dist.toFixed(2)}m 移動`;
+                        status.textContent = `追跡中: 1マス1m (計 ${dist.toFixed(2)}m移動)`;
                     }
-                    
-                    // 背景グリッドと軌跡を描画
-                    drawGrid(curX, curZ);
+
+                    // 2Dキャンバスの描画を更新
+                    drawEverything(curX, curZ);
                 } else {
-                    status.textContent = "空間を認識中... スマホを左右に振ってください";
+                    status.textContent = "空間を認識中... スマホを動かしてください";
                 }
             }
             renderer.render(scene, camera);
         }
 
-        function drawGrid(curX, curZ) {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        function drawEverything(curX, curZ) {
+            ctx.clearRect(0, 0, mapCanvas.width, mapCanvas.height);
             
-            const centerX = canvas.width / 2;
-            const centerY = canvas.height / 2;
+            const centerX = mapCanvas.width / 2;
+            const centerY = mapCanvas.height / 2;
 
             ctx.save();
-            // 現在地(curX, curZ)が常に画面の中央に来るようにキャンバスを動かす
+            // 自分の現在地が画面中央にくるようにカメラを移動
             ctx.translate(centerX - curX * SCALE, centerY - curZ * SCALE);
 
-            // --- 1. グリッド（1マスの網目）を描く ---
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+            // --- 1. グリッドの描画 (1メートルおき) ---
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.3)"; // 白のうっすらした線
             ctx.lineWidth = 1;
-            const gridSize = SCALE;
-            const mapLimit = 100; // 100メートル分
-            
-            for (let i = -mapLimit; i <= mapLimit; i++) {
-                // 縦線
-                ctx.beginPath(); 
-                ctx.moveTo(i * gridSize, -mapLimit * gridSize); 
-                ctx.lineTo(i * gridSize, mapLimit * gridSize); 
-                ctx.stroke();
-                // 横線
-                ctx.beginPath(); 
-                ctx.moveTo(-mapLimit * gridSize, i * gridSize); 
-                ctx.lineTo(mapLimit * gridSize, i * gridSize); 
-                ctx.stroke();
+            const range = 50; // 50メートル分
+            for (let i = -range; i <= range; i++) {
+                // 縦
+                ctx.beginPath(); ctx.moveTo(i * SCALE, -range * SCALE); ctx.lineTo(i * SCALE, range * SCALE); ctx.stroke();
+                // 横
+                ctx.beginPath(); ctx.moveTo(-range * SCALE, i * SCALE); ctx.lineTo(range * SCALE, i * SCALE); ctx.stroke();
             }
 
-            // --- 2. 軌跡（歩いた跡）を緑色の太線で描く ---
+            // --- 2. 軌跡の描画 (緑の太い線) ---
             if (points.length > 1) {
                 ctx.strokeStyle = "#00FF00";
                 ctx.lineWidth = 6;
                 ctx.lineCap = "round";
                 ctx.lineJoin = "round";
-                ctx.shadowBlur = 10;
-                ctx.shadowColor = "#00FF00";
-                
                 ctx.beginPath();
                 ctx.moveTo(points[0].x * SCALE, points[0].z * SCALE);
                 for (let i = 1; i < points.length; i++) {
                     ctx.lineTo(points[i].x * SCALE, points[i].z * SCALE);
                 }
                 ctx.stroke();
-                ctx.shadowBlur = 0; // シャドウリセット
             }
 
-            // --- 3. スタート地点の目印 ---
-            ctx.fillStyle = "#007AFF";
-            ctx.beginPath();
-            ctx.arc(points[0].x * SCALE, points[0].z * SCALE, 8, 0, Math.PI * 2);
-            ctx.fill();
+            // --- 3. スタート地点 (青い丸) ---
+            if (points.length > 0) {
+                ctx.fillStyle = "#007AFF";
+                ctx.beginPath();
+                ctx.arc(points[0].x * SCALE, points[0].z * SCALE, 8, 0, Math.PI * 2);
+                ctx.fill();
+            }
 
             ctx.restore();
 
-            // --- 4. 自分の現在地マーク（常に画面中央に固定） ---
+            // --- 4. 現在地 (赤い丸：画面中央に固定) ---
             ctx.fillStyle = "#FF3B30";
             ctx.beginPath();
             ctx.arc(centerX, centerY, 10, 0, Math.PI * 2);
@@ -240,7 +222,7 @@
             ctx.stroke();
         }
 
-        // PDF書き出し処理
+        // PDFの保存
         function exportPDF() {
             const { jsPDF } = window.jspdf;
             
@@ -250,12 +232,12 @@
                 minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
             });
 
-            const margin = 2; // 2メートルの余白
+            const margin = 1; // 1mの余白
             const wM = (maxX - minX) + margin * 2;
             const hM = (maxZ - minZ) + margin * 2;
 
             const pdfCanvas = document.createElement('canvas');
-            const pdfPPM = 100; // PDF内では 1m = 100px で高精細に
+            const pdfPPM = 100; // PDF上で 1m = 100px
             pdfCanvas.width = wM * pdfPPM;
             pdfCanvas.height = hM * pdfPPM;
             const pctx = pdfCanvas.getContext('2d');
@@ -264,8 +246,8 @@
             pctx.fillRect(0, 0, pdfCanvas.width, pdfCanvas.height);
             pctx.translate((-minX + margin) * pdfPPM, (-minZ + margin) * pdfPPM);
 
-            // マス目
-            pctx.strokeStyle = "#E5E5E5";
+            // PDF用グリッド
+            pctx.strokeStyle = "#EEEEEE";
             pctx.lineWidth = 1;
             for(let i = Math.floor(minX-margin); i <= Math.ceil(maxX+margin); i++) {
                 pctx.beginPath(); pctx.moveTo(i * pdfPPM, -5000); pctx.lineTo(i * pdfPPM, 5000); pctx.stroke();
@@ -274,9 +256,9 @@
                 pctx.beginPath(); pctx.moveTo(-5000, i * pdfPPM); pctx.lineTo(5000, i * pdfPPM); pctx.stroke();
             }
 
-            // 軌跡
+            // PDF用軌跡
             pctx.strokeStyle = "black";
-            pctx.lineWidth = 3;
+            pctx.lineWidth = 4;
             pctx.beginPath();
             pctx.moveTo(points[0].x * pdfPPM, points[0].z * pdfPPM);
             points.forEach(p => pctx.lineTo(p.x * pdfPPM, p.z * pdfPPM));
@@ -284,8 +266,11 @@
 
             const pdf = new jsPDF(wM > hM ? 'l' : 'p', 'mm', [wM * 10, hM * 10]);
             pdf.addImage(pdfCanvas.toDataURL('image/png'), 'PNG', 0, 0, wM * 10, hM * 10);
-            pdf.save("ar_trace_map.pdf");
+            pdf.save("floor_plan.pdf");
         }
+
+        // セッション終了イベントの登録
+        renderer.xr.addEventListener('sessionend', onSessionEnd);
 
         init();
     </script>
