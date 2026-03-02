@@ -3,24 +3,31 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>2D Map Tracker Pro</title>
+    <title>AR Precision 2D Map</title>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
-        body { margin: 0; overflow: hidden; background: #121212; font-family: -apple-system, sans-serif; color: white; }
-        #map-canvas { background: #000; width: 100vw; height: 100vh; touch-action: none; }
-        #ui { position: absolute; bottom: 30px; left: 0; width: 100%; display: flex; flex-direction: column; align-items: center; gap: 12px; z-index: 100; }
-        .btn-group { display: flex; gap: 10px; width: 90%; max-width: 400px; }
-        button { flex: 1; padding: 18px; font-size: 16px; font-weight: bold; border: none; border-radius: 15px; color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.6); }
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        /* 2Dマップを最前面に配置（カメラ映像の上に重ねる） */
+        #map-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 5; background: rgba(0,0,0,0.8); }
+        #ui { position: absolute; bottom: 40px; left: 0; width: 100%; display: flex; flex-direction: column; align-items: center; gap: 15px; z-index: 100; }
+        .btn-group { display: flex; gap: 12px; width: 90%; max-width: 400px; }
+        button { flex: 1; padding: 20px; font-size: 18px; font-weight: bold; border: none; border-radius: 15px; color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         #start-btn { background: #007AFF; }
         #stop-btn { background: #FF3B30; display: none; }
         #save-btn { background: #34C759; display: none; }
-        #info { position: absolute; top: 50px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); padding: 12px 24px; border-radius: 30px; font-size: 14px; border: 1px solid #333; }
+        #status { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); background: #007AFF; color: white; padding: 10px 25px; border-radius: 25px; font-size: 14px; z-index: 110; font-weight: bold; }
     </style>
 </head>
 <body>
-    <div id="info">準備完了：スタートを押して歩いてください</div>
+    <div id="status">AR準備完了：スタートを押してください</div>
     <canvas id="map-canvas"></canvas>
-    
     <div id="ui">
         <div class="btn-group">
             <button id="start-btn">スタート</button>
@@ -29,170 +36,185 @@
         </div>
     </div>
 
-    <script>
+    <script type="module">
+        import * as THREE from 'three';
+
         const canvas = document.getElementById('map-canvas');
         const ctx = canvas.getContext('2d');
         const startBtn = document.getElementById('start-btn');
         const stopBtn = document.getElementById('stop-btn');
         const saveBtn = document.getElementById('save-btn');
-        const info = document.getElementById('info');
+        const status = document.getElementById('status');
 
+        let renderer, scene, camera, currentSession;
         let points = [];
         let isTracking = false;
-        let posX = 0, posZ = 0; 
-        let velX = 0, velZ = 0; 
         
-        const PPM = 50; // 1メートル = 50ピクセル (厳守)
-        const DT = 0.02; // サンプリング間隔 (約50Hz)
+        // 描画設定: 1メートル = 60ピクセル
+        const SCALE = 60; 
 
-        function resize() {
+        function init() {
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            // 床認識を待たずに開始できる'local'モードを使用
+            renderer.xr.setReferenceSpaceType('local');
+
+            startBtn.addEventListener('click', startAR);
+            stopBtn.addEventListener('click', stopAR);
+            saveBtn.addEventListener('click', exportPDF);
+
+            window.addEventListener('resize', onResize);
+            onResize();
+            drawGrid(0, 0); // 初期表示
+        }
+
+        function onResize() {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
-            draw();
-        }
-        window.addEventListener('resize', resize);
-        resize();
-
-        async function startTracking() {
-            if (typeof DeviceMotionEvent.requestPermission === 'function') {
-                const permission = await DeviceMotionEvent.requestPermission();
-                if (permission !== 'granted') return;
-            }
-
-            isTracking = true;
-            points = [{x: 0, z: 0}];
-            posX = 0; posZ = 0; velX = 0; velZ = 0;
-            
-            startBtn.style.display = 'none';
-            stopBtn.style.display = 'block';
-            saveBtn.style.display = 'none';
-            info.textContent = "追跡中：1マス1メートルです";
-
-            window.addEventListener('devicemotion', handleMotion);
-            requestAnimationFrame(updateLoop);
+            drawGrid(0, 0);
         }
 
-        function stopTracking() {
-            isTracking = false;
-            window.removeEventListener('devicemotion', handleMotion);
-            stopBtn.style.display = 'none';
-            startBtn.style.display = 'block';
-            saveBtn.style.display = 'block';
-            info.textContent = "終了：PDFで保存できます";
-        }
+        async function startAR() {
+            try {
+                const session = await navigator.xr.requestSession('immersive-ar', {
+                    requiredFeatures: ['local']
+                });
+                renderer.xr.setSession(session);
+                currentSession = session;
 
-        function handleMotion(event) {
-            if (!isTracking) return;
-            
-            const acc = event.acceleration;
-            if (!acc || acc.x === null) return;
+                points = [{x: 0, z: 0}];
+                isTracking = true;
 
-            // --- 左右の動き (X軸) ---
-            // 右に動いたときに右に描画されるよう符号を調整
-            let ax = -acc.x; 
-            if (Math.abs(ax) < 0.15) ax = 0; // ノイズ除去
+                startBtn.style.display = 'none';
+                stopBtn.style.display = 'block';
+                saveBtn.style.display = 'none';
+                status.textContent = "追跡中：歩くと線が描かれます";
 
-            // --- 前後の動き (Y軸とZ軸を合成) ---
-            // スマホの持ち方（立てる/寝かせる）に関わらず前後の加速を拾う
-            let az = (Math.abs(acc.y) > Math.abs(acc.z)) ? acc.y : acc.z;
-            if (Math.abs(az) < 0.15) az = 0; // ノイズ除去
-
-            // 速度の計算 (v = v + a*t)
-            velX += ax * DT;
-            velZ += az * DT;
-
-            // 擬似的な摩擦（静止したときに速度を0に近づける）
-            velX *= 0.96;
-            velZ *= 0.96;
-
-            // 位置の計算 (p = p + v*t)
-            posX += velX * DT;
-            posZ += velZ * DT;
-
-            const last = points[points.length - 1];
-            // 3cm以上の変化があれば記録
-            if (Math.hypot(posX - last.x, posZ - last.z) > 0.03) {
-                points.push({x: posX, z: posZ});
+                renderer.setAnimationLoop(render);
+            } catch (e) {
+                alert("ARを開始できませんでした: " + e.message);
             }
         }
 
-        function updateLoop() {
-            if (isTracking) {
-                draw();
-                requestAnimationFrame(updateLoop);
+        function stopAR() {
+            if (currentSession) currentSession.end();
+        }
+
+        function render(timestamp, frame) {
+            if (frame && isTracking) {
+                const refSpace = renderer.xr.getReferenceSpace();
+                const pose = frame.getViewerPose(refSpace);
+
+                if (pose) {
+                    const pos = pose.transform.position;
+                    // ARの座標系: X=右/左, Z=手前/奥
+                    const curX = pos.x;
+                    const curZ = pos.z;
+
+                    const last = points[points.length - 1];
+                    const dist = Math.hypot(curX - last.x, curZ - last.z);
+
+                    // 2cm以上動いたら記録
+                    if (dist > 0.02) {
+                        points.push({ x: curX, z: curZ });
+                        status.textContent = `記録中: ${points.length} 地点`;
+                    }
+                    
+                    // 描画更新
+                    drawGrid(curX, curZ);
+                }
             }
         }
 
-        function draw() {
+        function drawGrid(curX, curZ) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            const cx = canvas.width / 2;
-            const cy = canvas.height / 2;
+            
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
 
             ctx.save();
-            ctx.translate(cx, cy);
+            // 常に自分の現在地が画面中央にくるようにスクロールさせる
+            ctx.translate(centerX - curX * SCALE, centerY - curZ * SCALE);
 
-            // --- 1メートルのグリッド (50px間隔) ---
-            ctx.strokeStyle = '#222';
+            // 1. 1メートルおきのマス目描画
+            ctx.strokeStyle = "#333333";
             ctx.lineWidth = 1;
-            for(let i = -50; i <= 50; i++) {
+            const range = 50; // 50メートル分描画
+            for (let i = -range; i <= range; i++) {
                 // 縦線
-                ctx.beginPath(); ctx.moveTo(i * PPM, -2000); ctx.lineTo(i * PPM, 2000); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(i * SCALE, -range * SCALE); ctx.lineTo(i * SCALE, range * SCALE); ctx.stroke();
                 // 横線
-                ctx.beginPath(); ctx.moveTo(-2000, i * PPM); ctx.lineTo(2000, i * PPM); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(-range * SCALE, i * SCALE); ctx.lineTo(range * SCALE, i * SCALE); ctx.stroke();
             }
 
-            // 中心線（少し明るく）
-            ctx.strokeStyle = '#444';
-            ctx.beginPath(); ctx.moveTo(0, -2000); ctx.lineTo(0, 2000); ctx.stroke();
-            ctx.beginPath(); ctx.moveTo(-2000, 0); ctx.lineTo(2000, 0); ctx.stroke();
-
-            // --- 軌跡の描画 ---
+            // 2. 軌跡（緑の線）
             if (points.length > 1) {
-                ctx.strokeStyle = '#00FF00';
-                ctx.lineWidth = 4;
-                ctx.lineCap = 'round';
-                ctx.lineJoin = 'round';
+                ctx.strokeStyle = "#00FF00";
+                ctx.lineWidth = 5;
+                ctx.lineCap = "round";
+                ctx.lineJoin = "round";
                 ctx.beginPath();
-                ctx.moveTo(points[0].x * PPM, points[0].z * PPM);
+                ctx.moveTo(points[0].x * SCALE, points[0].z * SCALE);
                 for (let i = 1; i < points.length; i++) {
-                    ctx.lineTo(points[i].x * PPM, points[i].z * PPM);
+                    ctx.lineTo(points[i].x * SCALE, points[i].z * SCALE);
                 }
                 ctx.stroke();
             }
 
-            // 現在地の赤い点
-            ctx.fillStyle = '#FF3B30';
+            // 3. スタート地点（青）
+            ctx.fillStyle = "#007AFF";
             ctx.beginPath();
-            ctx.arc(posX * PPM, posZ * PPM, 6, 0, Math.PI*2);
+            ctx.arc(points[0].x * SCALE, points[0].z * SCALE, 8, 0, Math.PI * 2);
             ctx.fill();
 
             ctx.restore();
+
+            // 4. 現在地マーク（固定の中央赤丸）
+            ctx.fillStyle = "#FF3B30";
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, 10, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "white";
+            ctx.lineWidth = 3;
+            ctx.stroke();
         }
 
-        function savePDF() {
+        currentSession?.addEventListener('end', () => {
+            isTracking = false;
+            renderer.setAnimationLoop(null);
+            stopBtn.style.display = 'none';
+            startBtn.style.display = 'block';
+            saveBtn.style.display = 'block';
+            status.textContent = "終了：PDFで保存できます";
+        });
+
+        function exportPDF() {
             const { jsPDF } = window.jspdf;
+            
             let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
             points.forEach(p => {
                 minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
                 minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
             });
 
-            const margin = 2; 
-            const w = (maxX - minX) + margin * 2;
-            const h = (maxZ - minZ) + margin * 2;
-            const pdfPPM = 100;
+            const margin = 2; // 2メートルの余白
+            const wM = (maxX - minX) + margin * 2;
+            const hM = (maxZ - minZ) + margin * 2;
 
             const pdfCanvas = document.createElement('canvas');
-            pdfCanvas.width = w * pdfPPM;
-            pdfCanvas.height = h * pdfPPM;
+            const pdfPPM = 100; // 1m = 100px
+            pdfCanvas.width = wM * pdfPPM;
+            pdfCanvas.height = hM * pdfPPM;
             const pctx = pdfCanvas.getContext('2d');
 
-            pctx.fillStyle = 'white';
+            pctx.fillStyle = "white";
             pctx.fillRect(0, 0, pdfCanvas.width, pdfCanvas.height);
             pctx.translate((-minX + margin) * pdfPPM, (-minZ + margin) * pdfPPM);
 
-            // PDFグリッド (1m)
-            pctx.strokeStyle = '#DDDDDD';
+            // マス目（PDF用）
+            pctx.strokeStyle = "#EEEEEE";
             pctx.lineWidth = 1;
             for(let i = Math.floor(minX-margin); i <= Math.ceil(maxX+margin); i++) {
                 pctx.beginPath(); pctx.moveTo(i * pdfPPM, -5000); pctx.lineTo(i * pdfPPM, 5000); pctx.stroke();
@@ -201,21 +223,21 @@
                 pctx.beginPath(); pctx.moveTo(-5000, i * pdfPPM); pctx.lineTo(5000, i * pdfPPM); pctx.stroke();
             }
 
-            pctx.strokeStyle = 'black';
-            pctx.lineWidth = 3;
+            // 線（黒）
+            pctx.strokeStyle = "black";
+            pctx.lineWidth = 4;
             pctx.beginPath();
             pctx.moveTo(points[0].x * pdfPPM, points[0].z * pdfPPM);
             points.forEach(p => pctx.lineTo(p.x * pdfPPM, p.z * pdfPPM));
             pctx.stroke();
 
-            const pdf = new jsPDF(w > h ? 'l' : 'p', 'mm', [w * 10, h * 10]);
-            pdf.addImage(pdfCanvas.toDataURL('image/png'), 'PNG', 0, 0, w * 10, h * 10);
-            pdf.save('trajectory_map.pdf');
+            const pdf = new jsPDF(wM > hM ? 'l' : 'p', 'mm', [wM * 10, hM * 10]);
+            pdf.addImage(pdfCanvas.toDataURL('image/png'), 'PNG', 0, 0, wM * 10, hM * 10);
+            pdf.save("map.pdf");
+            status.textContent = "保存しました！";
         }
 
-        startBtn.addEventListener('click', startTracking);
-        stopBtn.addEventListener('click', stopTracking);
-        saveBtn.addEventListener('click', savePDF);
+        init();
     </script>
 </body>
 </html>
