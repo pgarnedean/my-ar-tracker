@@ -3,22 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>2D Trajectory Map</title>
+    <title>2D Map Tracker Pro</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
-        body { margin: 0; overflow: hidden; background: #1a1a1a; font-family: -apple-system, sans-serif; color: white; }
+        body { margin: 0; overflow: hidden; background: #121212; font-family: -apple-system, sans-serif; color: white; }
         #map-canvas { background: #000; width: 100vw; height: 100vh; touch-action: none; }
         #ui { position: absolute; bottom: 30px; left: 0; width: 100%; display: flex; flex-direction: column; align-items: center; gap: 12px; z-index: 100; }
         .btn-group { display: flex; gap: 10px; width: 90%; max-width: 400px; }
-        button { flex: 1; padding: 16px; font-size: 16px; font-weight: bold; border: none; border-radius: 12px; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        button { flex: 1; padding: 18px; font-size: 16px; font-weight: bold; border: none; border-radius: 15px; color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.6); }
         #start-btn { background: #007AFF; }
         #stop-btn { background: #FF3B30; display: none; }
         #save-btn { background: #34C759; display: none; }
-        #info { position: absolute; top: 50px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 20px; font-size: 14px; white-space: nowrap; }
+        #info { position: absolute; top: 50px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); padding: 12px 24px; border-radius: 30px; font-size: 14px; border: 1px solid #333; }
     </style>
 </head>
 <body>
-    <div id="info">準備完了：スタートを押してください</div>
+    <div id="info">準備完了：スタートを押して歩いてください</div>
     <canvas id="map-canvas"></canvas>
     
     <div id="ui">
@@ -39,11 +39,11 @@
 
         let points = [];
         let isTracking = false;
-        let posX = 0, posZ = 0; // メートル単位
-        let velX = 0, velZ = 0; // 速度
+        let posX = 0, posZ = 0; 
+        let velX = 0, velZ = 0; 
         
-        const PPM = 50; // 画面表示：1メートル = 50ピクセル
-        let lastTime = 0;
+        const PPM = 50; // 1メートル = 50ピクセル (厳守)
+        const DT = 0.02; // サンプリング間隔 (約50Hz)
 
         function resize() {
             canvas.width = window.innerWidth;
@@ -53,14 +53,10 @@
         window.addEventListener('resize', resize);
         resize();
 
-        // 加速度センサーの許可と開始
         async function startTracking() {
             if (typeof DeviceMotionEvent.requestPermission === 'function') {
                 const permission = await DeviceMotionEvent.requestPermission();
-                if (permission !== 'granted') {
-                    alert('センサーの利用が許可されませんでした');
-                    return;
-                }
+                if (permission !== 'granted') return;
             }
 
             isTracking = true;
@@ -70,7 +66,7 @@
             startBtn.style.display = 'none';
             stopBtn.style.display = 'block';
             saveBtn.style.display = 'none';
-            info.textContent = "追跡中：スマホを持って移動してください";
+            info.textContent = "追跡中：1マス1メートルです";
 
             window.addEventListener('devicemotion', handleMotion);
             requestAnimationFrame(updateLoop);
@@ -82,33 +78,40 @@
             stopBtn.style.display = 'none';
             startBtn.style.display = 'block';
             saveBtn.style.display = 'block';
-            info.textContent = "停止しました。PDF保存が可能です。";
+            info.textContent = "終了：PDFで保存できます";
         }
 
         function handleMotion(event) {
             if (!isTracking) return;
-            const dt = 0.02; // 約50Hzと仮定
             
-            // 傾きを無視した重力除去後の加速度（重力加速度を除いた純粋な移動）
-            // 注意: iPhoneのWebXR Viewerの場合、accel.x/zを使用
             const acc = event.acceleration;
-            if (!acc.x) return;
+            if (!acc || acc.x === null) return;
 
-            // 速度と位置を更新（ダブル積分）
-            // 軽微なノイズカット（静止時のドリフト軽減）
-            if (Math.abs(acc.x) > 0.1) velX += acc.x * dt;
-            if (Math.abs(acc.z) > 0.1) velZ += acc.z * dt;
-            
-            // 摩擦係数（速度が無限に増えないように微調整）
-            velX *= 0.95;
-            velZ *= 0.95;
+            // --- 左右の動き (X軸) ---
+            // 右に動いたときに右に描画されるよう符号を調整
+            let ax = -acc.x; 
+            if (Math.abs(ax) < 0.15) ax = 0; // ノイズ除去
 
-            posX += velX * dt;
-            posZ += velZ * dt;
+            // --- 前後の動き (Y軸とZ軸を合成) ---
+            // スマホの持ち方（立てる/寝かせる）に関わらず前後の加速を拾う
+            let az = (Math.abs(acc.y) > Math.abs(acc.z)) ? acc.y : acc.z;
+            if (Math.abs(az) < 0.15) az = 0; // ノイズ除去
 
-            // 5cm以上動いたらプロット
+            // 速度の計算 (v = v + a*t)
+            velX += ax * DT;
+            velZ += az * DT;
+
+            // 擬似的な摩擦（静止したときに速度を0に近づける）
+            velX *= 0.96;
+            velZ *= 0.96;
+
+            // 位置の計算 (p = p + v*t)
+            posX += velX * DT;
+            posZ += velZ * DT;
+
             const last = points[points.length - 1];
-            if (Math.hypot(posX - last.x, posZ - last.z) > 0.05) {
+            // 3cm以上の変化があれば記録
+            if (Math.hypot(posX - last.x, posZ - last.z) > 0.03) {
                 points.push({x: posX, z: posZ});
             }
         }
@@ -128,18 +131,26 @@
             ctx.save();
             ctx.translate(cx, cy);
 
-            // 1mのグリッド描画
-            ctx.strokeStyle = '#333';
+            // --- 1メートルのグリッド (50px間隔) ---
+            ctx.strokeStyle = '#222';
             ctx.lineWidth = 1;
-            for(let i = -20; i <= 20; i++) {
-                ctx.beginPath(); ctx.moveTo(i * PPM, -1000); ctx.lineTo(i * PPM, 1000); ctx.stroke();
-                ctx.beginPath(); ctx.moveTo(-1000, i * PPM); ctx.lineTo(1000, i * PPM); ctx.stroke();
+            for(let i = -50; i <= 50; i++) {
+                // 縦線
+                ctx.beginPath(); ctx.moveTo(i * PPM, -2000); ctx.lineTo(i * PPM, 2000); ctx.stroke();
+                // 横線
+                ctx.beginPath(); ctx.moveTo(-2000, i * PPM); ctx.lineTo(2000, i * PPM); ctx.stroke();
             }
 
-            // 軌跡の描画
+            // 中心線（少し明るく）
+            ctx.strokeStyle = '#444';
+            ctx.beginPath(); ctx.moveTo(0, -2000); ctx.lineTo(0, 2000); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(-2000, 0); ctx.lineTo(2000, 0); ctx.stroke();
+
+            // --- 軌跡の描画 ---
             if (points.length > 1) {
                 ctx.strokeStyle = '#00FF00';
-                ctx.lineWidth = 3;
+                ctx.lineWidth = 4;
+                ctx.lineCap = 'round';
                 ctx.lineJoin = 'round';
                 ctx.beginPath();
                 ctx.moveTo(points[0].x * PPM, points[0].z * PPM);
@@ -149,10 +160,10 @@
                 ctx.stroke();
             }
 
-            // 現在地
-            ctx.fillStyle = 'red';
+            // 現在地の赤い点
+            ctx.fillStyle = '#FF3B30';
             ctx.beginPath();
-            ctx.arc(posX * PPM, posZ * PPM, 5, 0, Math.PI*2);
+            ctx.arc(posX * PPM, posZ * PPM, 6, 0, Math.PI*2);
             ctx.fill();
 
             ctx.restore();
@@ -160,20 +171,18 @@
 
         function savePDF() {
             const { jsPDF } = window.jspdf;
-            
-            // 範囲計算
             let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
             points.forEach(p => {
                 minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
                 minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
             });
 
-            const margin = 2; // 2m余白
+            const margin = 2; 
             const w = (maxX - minX) + margin * 2;
             const h = (maxZ - minZ) + margin * 2;
+            const pdfPPM = 100;
 
             const pdfCanvas = document.createElement('canvas');
-            const pdfPPM = 100;
             pdfCanvas.width = w * pdfPPM;
             pdfCanvas.height = h * pdfPPM;
             const pctx = pdfCanvas.getContext('2d');
@@ -182,18 +191,18 @@
             pctx.fillRect(0, 0, pdfCanvas.width, pdfCanvas.height);
             pctx.translate((-minX + margin) * pdfPPM, (-minZ + margin) * pdfPPM);
 
-            // グリッド
-            pctx.strokeStyle = '#eee';
-            for(let i = Math.floor(minX - margin); i <= Math.ceil(maxX + margin); i++) {
-                pctx.beginPath(); pctx.moveTo(i * pdfPPM, -10000); pctx.lineTo(i * pdfPPM, 10000); pctx.stroke();
+            // PDFグリッド (1m)
+            pctx.strokeStyle = '#DDDDDD';
+            pctx.lineWidth = 1;
+            for(let i = Math.floor(minX-margin); i <= Math.ceil(maxX+margin); i++) {
+                pctx.beginPath(); pctx.moveTo(i * pdfPPM, -5000); pctx.lineTo(i * pdfPPM, 5000); pctx.stroke();
             }
-            for(let i = Math.floor(minZ - margin); i <= Math.ceil(maxZ + margin); i++) {
-                pctx.beginPath(); pctx.moveTo(-10000, i * pdfPPM); pctx.lineTo(10000, i * pdfPPM); pctx.stroke();
+            for(let i = Math.floor(minZ-margin); i <= Math.ceil(maxZ+margin); i++) {
+                pctx.beginPath(); pctx.moveTo(-5000, i * pdfPPM); pctx.lineTo(5000, i * pdfPPM); pctx.stroke();
             }
 
-            // 軌跡
             pctx.strokeStyle = 'black';
-            pctx.lineWidth = 2;
+            pctx.lineWidth = 3;
             pctx.beginPath();
             pctx.moveTo(points[0].x * pdfPPM, points[0].z * pdfPPM);
             points.forEach(p => pctx.lineTo(p.x * pdfPPM, p.z * pdfPPM));
@@ -201,7 +210,7 @@
 
             const pdf = new jsPDF(w > h ? 'l' : 'p', 'mm', [w * 10, h * 10]);
             pdf.addImage(pdfCanvas.toDataURL('image/png'), 'PNG', 0, 0, w * 10, h * 10);
-            pdf.save('map.pdf');
+            pdf.save('trajectory_map.pdf');
         }
 
         startBtn.addEventListener('click', startTracking);
